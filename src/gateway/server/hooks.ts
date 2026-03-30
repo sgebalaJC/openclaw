@@ -42,11 +42,33 @@ export function createGatewayHooksRequestHandler(params: {
   };
 
   const dispatchAgentHook = (value: HookAgentDispatchPayload) => {
+    const mainSessionKey = resolveMainSessionKeyFromConfig();
+    const resolvedTarget = value.sessionTarget ?? "isolated";
+
+    // "main" requires the systemEvent enqueue + heartbeat path that only the cron
+    // timer implements.  Hook dispatches go through runCronIsolatedAgentTurn which
+    // would silently treat "main" like "current" (no forceNew, wrong session
+    // semantics).  Reject it explicitly until the full main-session dispatch path
+    // is wired up for hooks.
+    if (resolvedTarget === "main") {
+      logHooks.warn(
+        `hook "${value.name}": sessionTarget "main" is not supported for hook dispatches — use "isolated" or "current" instead`,
+      );
+      throw new Error(
+        `sessionTarget "main" is not supported for hook dispatches. Use "isolated" (default) or "current".`,
+      );
+    }
+
+    // Resolve sessionKey based on sessionTarget:
+    // "current" → no conversation context in hooks, fall back to isolated
+    // "session:<id>" → use the explicit session id (goes through policy check)
+    // "isolated" / default → generate unique key
     const sessionKey = normalizeHookDispatchSessionKey({
-      sessionKey: value.sessionKey,
+      sessionKey: resolvedTarget.startsWith("session:")
+        ? resolvedTarget.slice("session:".length)
+        : value.sessionKey,
       targetAgentId: value.agentId,
     });
-    const mainSessionKey = resolveMainSessionKeyFromConfig();
     const jobId = randomUUID();
     const now = Date.now();
     const job: CronJob = {
@@ -57,7 +79,7 @@ export function createGatewayHooksRequestHandler(params: {
       createdAtMs: now,
       updatedAtMs: now,
       schedule: { kind: "at", at: new Date(now).toISOString() },
-      sessionTarget: "isolated",
+      sessionTarget: value.sessionTarget ?? "isolated",
       wakeMode: value.wakeMode,
       payload: {
         kind: "agentTurn",
